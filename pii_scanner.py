@@ -22,6 +22,7 @@ import csv
 import sys
 import argparse
 import logging
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -291,14 +292,14 @@ OUTPUT_HEADERS = [
 ]
 
 
-def scan_csv_file(
+def iter_csv_findings(
     csv_path: Path,
     folder_meta: dict,
     min_confidence: str,
     max_rows: int,
     include_sensitive_values: bool = False,
-) -> list[dict]:
-    results = []
+):
+    """Yield findings while reading one CSV; no report-wide accumulation."""
     min_rank = CONFIDENCE_RANK.get(min_confidence, 1)
     try:
         with open(csv_path, newline="", encoding="utf-8-sig", errors="replace") as fh:
@@ -320,8 +321,7 @@ def scan_csv_file(
                             if col_idx < len(headers)
                             else f"col_{col_idx}"
                         )
-                        results.append(
-                            {
+                        yield {
                                 "scan_date": folder_meta["scan_date"],
                                 "job_code": folder_meta["job_code"],
                                 "table_name": folder_meta["table_name"],
@@ -337,10 +337,15 @@ def scan_csv_file(
                                 "context": extract_context(row, col_idx) if include_sensitive_values else "",
                                 "folder_name": csv_path.parent.name,
                             }
-                        )
     except Exception as exc:
         log.warning("Could not read %s: %s", csv_path, exc)
-    return results
+
+
+def scan_csv_file(csv_path, folder_meta, min_confidence, max_rows,
+                  include_sensitive_values=False) -> list[dict]:
+    """Compatibility API for callers that need a materialized list."""
+    return list(iter_csv_findings(csv_path, folder_meta, min_confidence,
+                                 max_rows, include_sensitive_values))
 
 
 def run_scan(repo_path: str, output_path: str, min_confidence: str, max_rows: int, include_sensitive_values: bool = False):
@@ -351,48 +356,43 @@ def run_scan(repo_path: str, output_path: str, min_confidence: str, max_rows: in
         log.error("Repository path does not exist: %s", repo_path)
         sys.exit(1)
 
-    all_results: list[dict] = []
-    csv_count = 0
-    folder_count = 0
-
-    for item in sorted(repo.iterdir()):
-        if not item.is_dir():
-            continue
-        folder_count += 1
-        meta = parse_folder_name(item.name)
-        log.info(
-            "Scanning folder [%d] %s  (table=%s)",
-            folder_count,
-            item.name,
-            meta["table_name"],
-        )
-        for csv_file in sorted(item.rglob("*.csv")):
-            if csv_file.resolve() == Path(output_path).resolve():
-                continue
-            csv_count += 1
-            log.info("  → %s", csv_file.relative_to(repo))
-            hits = scan_csv_file(csv_file, meta, min_confidence, max_rows, include_sensitive_values)
-            all_results.extend(hits)
-            log.info("     %d hits", len(hits))
-
-    log.info(
-        "Scan complete. Folders=%d, CSVs=%d, Total flagged rows=%d",
-        folder_count,
-        csv_count,
-        len(all_results),
-    )
-
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.DictWriter(fh, fieldnames=OUTPUT_HEADERS)
-        writer.writeheader()
-        for result in all_results:
-            # Prevent spreadsheet formula execution, including metadata fields.
-            writer.writerow({key: ("'" + value if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')) else value) for key, value in result.items()})
-
+    output_resolved = out.resolve()
+    csv_count = folder_count = hit_count = 0
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8-sig",
+                dir=out.parent, prefix=".scan-", suffix=".tmp", delete=False) as fh:
+            temporary = Path(fh.name)
+            writer = csv.DictWriter(fh, fieldnames=OUTPUT_HEADERS)
+            writer.writeheader()
+            for item in sorted(repo.iterdir()):
+                if not item.is_dir():
+                    continue
+                folder_count += 1
+                meta = parse_folder_name(item.name)
+                log.info("Scanning folder [%d] %s (table=%s)", folder_count, item.name, meta["table_name"])
+                for csv_file in sorted(item.rglob("*.csv")):
+                    if csv_file.resolve() == output_resolved:
+                        continue
+                    csv_count += 1
+                    for result in iter_csv_findings(csv_file, meta, min_confidence,
+                            max_rows, include_sensitive_values):
+                        # Escape metadata as well as matches for spreadsheet safety.
+                        writer.writerow({key: ("'" + value if isinstance(value, str)
+                            and value.lstrip().startswith(('=', '+', '-', '@'))
+                            else value) for key, value in result.items()})
+                        hit_count += 1
+        os.replace(temporary, out)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    log.info("Scan complete. Folders=%d, CSVs=%d, Total flagged rows=%d",
+             folder_count, csv_count, hit_count)
     log.info("Output written to: %s", out.resolve())
-    return len(all_results)
+    return hit_count
 
 
 # ---------------------------------------------------------------------------

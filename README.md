@@ -30,11 +30,11 @@ Detection covers Australian identifier patterns, emails, phone numbers, dates, a
 signals. A label such as `High` is a rule priority, not a calibrated probability. Numeric patterns
 overlap; most identifiers do not have issuer/checksum validation. Card candidates use Luhn.
 This is a triage tool with false positives and false negatives, not proof that a dataset is PII-free.
-Results are collected in memory; split very large datasets into batches.
+The CLI streams findings into a temporary report and atomically replaces the destination after traversal, instead of collecting all findings in memory. The compatibility `scan_csv_file` function still returns a list. Memory can still grow with a very wide cell or directory listing.
 
 ## Validation
 
-8 synthetic regression tests pass: masking, explicit raw-data opt-in, row limits, folder parsing,
+10 synthetic regression tests cover: masking, explicit raw-data opt-in, row limits, folder parsing,
 card checksum, excluding prior output, negative limits and formula escaping. No real records are bundled.
 
 ## Public edition
@@ -42,3 +42,11 @@ card checksum, excluding prior output, negative limits and formula escaping. No 
 This is a separately prepared portfolio edition with fresh history. Private deployment settings,
 credentials, operational records, uploads, backups and organisation-specific assets are excluded.
 See [PUBLIC_EDITION.md](PUBLIC_EDITION.md). No deployment workflows are included.
+
+## Automated checks
+
+GitHub Actions runs offline regression checks on pushes and pull requests. These do not deploy the app, call paid AI services or establish model quality. 
+
+### Memory measurement
+
+A single Python 3.12/Linux run over 5,000 synthetic email rows produced identical report bytes before and after streaming. `tracemalloc` peak allocations fell from 2,692,673 to 199,554 bytes (about 93%). This measures Python allocations for that fixture, not total process memory or a throughput guarantee.

@@ -41,3 +41,34 @@ class ScannerTests(unittest.TestCase):
         with out.open(encoding='utf-8-sig') as f: row=next(csv.DictReader(f))
         self.assertEqual(row['column_name'],"'=header")
 if __name__=='__main__':unittest.main()
+
+class StreamingTests(unittest.TestCase):
+    def test_failed_scan_preserves_existing_report(self):
+        from unittest.mock import patch
+        import pii_scanner as scanner
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'input').mkdir()
+            (root / 'input' / 'sample.csv').write_text('email\na@example.test\n')
+            output = root / 'report.csv'
+            output.write_text('previous report')
+            def fail(*args):
+                yield dict(zip(scanner.OUTPUT_HEADERS, [''] * len(scanner.OUTPUT_HEADERS)))
+                raise RuntimeError('interrupted processing')
+            with patch.object(scanner, 'iter_csv_findings', side_effect=fail):
+                with self.assertRaises(RuntimeError):
+                    scanner.run_scan(str(root), str(output), 'High', 0)
+            self.assertEqual(output.read_text(), 'previous report')
+            self.assertEqual(list(root.glob('.scan-*.tmp')), [])
+
+    def test_streaming_output_matches_list_api(self):
+        import pii_scanner as scanner
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);folder=root/'data';folder.mkdir()
+            source=folder/'test.csv';source.write_text('email\na@example.test\nb@example.test\n')
+            expected=scanner.scan_csv_file(source,scanner.parse_folder_name('data'),'High',0)
+            output=root/'report.csv'
+            self.assertEqual(scanner.run_scan(str(root),str(output),'High',0),len(expected))
+            with output.open(encoding='utf-8-sig',newline='') as fh:
+                actual=list(csv.DictReader(fh))
+            self.assertEqual([r['matched_value'] for r in actual],[r['matched_value'] for r in expected])
